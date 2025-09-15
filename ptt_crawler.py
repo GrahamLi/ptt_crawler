@@ -1,6 +1,5 @@
 import requests
 from bs4 import BeautifulSoup
-import re
 from datetime import datetime, timedelta
 import argparse
 
@@ -12,20 +11,22 @@ def clean_input(text):
         return text.strip().replace(' ', '').replace('　', '')
     return text
 
-def get_ptt_articles(keyword, months, author=None, push_count=None, board_name='Stock'):
+def get_ptt_articles(keywords, months, author=None, push_count=None, exclude_keywords=None, board_name='Stock'):
     """
-    根據關鍵字、時間、作者和推文數，爬取 PTT 看板文章。
+    根據關鍵字、時間、作者、推文數及排除關鍵字，爬取 PTT 看板文章。
 
     Args:
-        keyword (str): 必填。搜尋的關鍵字。
+        keywords (list): 必填。搜尋的關鍵字列表。
         months (int): 必填。從當前日期往回推算的月份數。
         author (str): 選填。作者名稱。
         push_count (int): 選填。文章推文數的門檻。
+        exclude_keywords (list): 選填。排除的關鍵字列表。
         board_name (str): PTT 看板名稱，例如 'Stock'。
     """
     
     # 預處理輸入參數
-    cleaned_keyword = clean_input(keyword)
+    cleaned_keywords = [clean_input(kw) for kw in keywords] if keywords else []
+    cleaned_exclude_keywords = [clean_input(kw) for kw in exclude_keywords] if exclude_keywords else []
     cleaned_author = clean_input(author)
     
     # 設定目標時間範圍
@@ -40,12 +41,14 @@ def get_ptt_articles(keyword, months, author=None, push_count=None, board_name='
     page_count = 0
     
     print(f'正在爬取 PTT {board_name} 看板，搜尋符合以下條件的文章:')
-    print(f'  - 關鍵字: {keyword}')
-    print(f'  - 時間範圍: 過去 {months} 個月 (從 {start_date.strftime("%Y-%m-%d")} 至 {end_date.strftime("%Y-%m-%d")})')
+    print(f'  - 關鍵字 (AND): {keywords}')
+    print(f'  - 時間範圍: 過去 {months} 個月')
     if author:
         print(f'  - 作者: {author}')
     if push_count:
         print(f'  - 推文數 >= {push_count}')
+    if exclude_keywords:
+        print(f'  - 排除關鍵字 (OR): {exclude_keywords}')
     print('---')
     
     while True:
@@ -82,13 +85,23 @@ def get_ptt_articles(keyword, months, author=None, push_count=None, board_name='
                     is_oldest_article_reached = True
                     break
                 
-                if cleaned_keyword and cleaned_keyword not in clean_input(article_title):
-                    continue
+                # 判斷是否符合所有關鍵字 (交集)
+                title_cleaned = clean_input(article_title)
+                if cleaned_keywords:
+                    if not all(kw in title_cleaned for kw in cleaned_keywords):
+                        continue
                 
+                # 判斷是否包含排除關鍵字 (聯集)
+                if cleaned_exclude_keywords:
+                    if any(kw in title_cleaned for kw in cleaned_exclude_keywords):
+                        continue
+                
+                # 檢查是否符合作者條件 (如果作者參數有填寫)
                 article_author = author_tag.text.strip()
                 if cleaned_author and cleaned_author != clean_input(article_author):
                     continue
                 
+                # 檢查是否符合推文數條件 (如果推文數參數有填寫)
                 article_push = push_tag.text.strip()
                 article_push_count = 0
                 if article_push == '爆':
@@ -100,14 +113,15 @@ def get_ptt_articles(keyword, months, author=None, push_count=None, board_name='
                     if remaining_str.isdigit():
                         article_push_count = int(remaining_str) * 100
                     else:
-                        # 處理 'X' 或 'X' 後面沒有數字的情況
                         article_push_count = 100
                 
                 if push_count and article_push_count < push_count:
                     continue
                 
+                # 如果所有條件都符合，抓取文章內文
                 article_content, article_summary = get_article_content(article_link, article_author)
                 
+                # 將符合條件的文章資訊加入列表
                 all_articles.append({
                     'title': article_title,
                     'link': article_link,
@@ -120,7 +134,7 @@ def get_ptt_articles(keyword, months, author=None, push_count=None, board_name='
                 
                 print(f'找到一篇文章: {article_title} (作者: {article_author}, 推文: {article_push_count})')
                 
-            if is_oldest_article_reached or page_count > 500: # 增加頁數上限以防萬一
+            if is_oldest_article_reached or page_count > 500:
                 print('已達到時間範圍邊界，或已爬取大量頁面，停止爬取。')
                 break
                 
@@ -171,21 +185,30 @@ def get_article_content(url, author):
         return "內容抓取失敗", "摘要抓取失敗"
         
 if __name__ == '__main__':
+    # 使用 argparse 來處理指令列參數
     parser = argparse.ArgumentParser(description='PTT 看板文章爬蟲工具')
-    parser.add_argument('--keyword', type=str, required=False, help='搜尋的關鍵字')
+    parser.add_argument('--keyword', type=str, required=False, help='搜尋的關鍵字，多個關鍵字請用逗號分隔 (ex: "台積電,情報")')
     parser.add_argument('--months', type=int, required=True, help='從當前日期往回推算的月份數')
     parser.add_argument('--author', type=str, required=False, help='作者名稱 (選填)')
     parser.add_argument('--push_count', type=int, required=False, help='推文數門檻 (選填)')
+    parser.add_argument('--exclude', type=str, required=False, help='排除的關鍵字，多個關鍵字請用逗號分隔 (ex: "新聞,處份")')
     
     args = parser.parse_args()
+
+    # 解析逗號分隔的關鍵字字串
+    keywords = args.keyword.split(',') if args.keyword else []
+    exclude_keywords = args.exclude.split(',') if args.exclude else []
     
+    # 呼叫爬蟲函式，並傳入解析後的參數
     results = get_ptt_articles(
-        keyword=args.keyword,
+        keywords=keywords,
         months=args.months,
         author=args.author,
-        push_count=args.push_count
+        push_count=args.push_count,
+        exclude_keywords=exclude_keywords
     )
     
+    # 顯示結果
     print('\n' + '='*50)
     print(f'共找到 {len(results)} 篇符合條件的文章。')
     print('='*50)
